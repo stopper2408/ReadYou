@@ -131,12 +131,9 @@ abstract class AbstractRssRepository(
 
     open suspend fun batchMarkAsRead(articleIds: Set<String>, isUnread: Boolean) {
         val accountId = accountService.getCurrentAccountId()
-        articleIds
-            .takeIf { it.isNotEmpty() }
-            ?.chunked(500)
-            ?.forEachIndexed { index, it ->
-                articleDao.markAsReadByIdSet(accountId, it.toSet(), isUnread)
-            }
+        if (articleIds.isNotEmpty()) {
+            articleDao.batchMarkAsReadTransactional(accountId, articleIds, isUnread)
+        }
     }
 
     open suspend fun syncReadStatus(articleIds: Set<String>, isUnread: Boolean): Set<String> {

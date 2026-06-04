@@ -474,7 +474,7 @@ constructor(
                         whileSelect {
                             for (deferred in deferredList) {
                                 deferred.onAwait {
-                                    articleDao.insertList(it)
+                                    articleDao.upsertArticlesSync(it)
                                     articlesToNotify.addAll(
                                         it.fastFilter {
                                             it.isUnread && notificationFeedIds.contains(it.feedId)
@@ -663,7 +663,7 @@ constructor(
                     }
             }
 
-            articleDao.insert(*items.toTypedArray())
+            articleDao.upsertArticlesSync(items)
             Timber.i("onCompletion: ${System.currentTimeMillis() - preTime}")
 
             ListenableWorker.Result.success()

@@ -22,6 +22,9 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import me.ash.reader.domain.model.account.Account
 import me.ash.reader.domain.model.account.AccountType
 import me.ash.reader.domain.model.article.ArticleWithFeed
@@ -42,6 +45,8 @@ class DiffMapHolder @Inject constructor(
     private val accountService: AccountService,
     private val rssService: RssService,
 ) {
+    private val fileMutex = Mutex()
+
     val diffMap = mutableStateMapOf<String, Diff>()
 
     private val pendingSyncDiffs = mutableStateMapOf<String, Diff>()
@@ -209,25 +214,33 @@ class DiffMapHolder @Inject constructor(
 
     fun commitDiffsToDb() {
         applicationScope.launch(ioDispatcher) {
-            val markAsReadArticles = diffMap.filter { !it.value.isUnread }.map { it.key }.toSet()
-            val markAsUnreadArticles = diffMap.filter { it.value.isUnread }.map { it.key }.toSet()
-            clearDiffs()
-            rssService.get().batchMarkAsRead(articleIds = markAsReadArticles, isUnread = false)
-            rssService.get().batchMarkAsRead(articleIds = markAsUnreadArticles, isUnread = true)
+            withContext(NonCancellable) {
+                val markAsReadArticles = diffMap.filter { !it.value.isUnread }.map { it.key }.toSet()
+                val markAsUnreadArticles = diffMap.filter { it.value.isUnread }.map { it.key }.toSet()
+                
+                runCatching {
+                    rssService.get().batchMarkAsRead(articleIds = markAsReadArticles, isUnread = false)
+                    rssService.get().batchMarkAsRead(articleIds = markAsUnreadArticles, isUnread = true)
+                }.onSuccess {
+                    clearDiffs()
+                }
+            }
         }
     }
 
     private fun writeDiffsToCache() {
         applicationScope.launch(ioDispatcher) {
-            try {
-                val tmpJson = gson.toJson(diffMap)
-                userCacheDir.mkdirs()
-                cacheFile.createNewFile()
-                if (cacheFile.exists() && cacheFile.canWrite()) {
-                    cacheFile.writeText(tmpJson)
-                }
-            } catch (_: Exception) {
+            fileMutex.withLock {
+                try {
+                    val tmpJson = gson.toJson(diffMap)
+                    userCacheDir.mkdirs()
+                    cacheFile.createNewFile()
+                    if (cacheFile.exists() && cacheFile.canWrite()) {
+                        cacheFile.writeText(tmpJson)
+                    }
+                } catch (_: Exception) {
 
+                }
             }
         }
     }
@@ -266,15 +279,17 @@ class DiffMapHolder @Inject constructor(
 
     private fun commitDiffsFromCache() {
         applicationScope.launch(ioDispatcher) {
-            if (cacheFile.exists() && cacheFile.canRead()) {
-                val tmpJson = cacheFile.readText()
-                val mapType = object : TypeToken<Map<String, Diff>>() {}.type
-                val diffMapFromCache = gson.fromJson<Map<String, Diff>>(
-                    tmpJson, mapType
-                )
-                diffMapFromCache?.let {
-                    diffMap.clear()
-                    diffMap.putAll(it)
+            fileMutex.withLock {
+                if (cacheFile.exists() && cacheFile.canRead()) {
+                    val tmpJson = cacheFile.readText()
+                    val mapType = object : TypeToken<Map<String, Diff>>() {}.type
+                    val diffMapFromCache = gson.fromJson<Map<String, Diff>>(
+                        tmpJson, mapType
+                    )
+                    diffMapFromCache?.let {
+                        diffMap.clear()
+                        diffMap.putAll(it)
+                    }
                 }
             }
         }.invokeOnCompletion {
@@ -282,8 +297,8 @@ class DiffMapHolder @Inject constructor(
         }
     }
 
-    private fun clearDiffs() {
-        applicationScope.launch(ioDispatcher) {
+    private suspend fun clearDiffs() {
+        fileMutex.withLock {
             if (cacheFile.exists() && cacheFile.canWrite()) {
                 cacheFile.delete()
             }

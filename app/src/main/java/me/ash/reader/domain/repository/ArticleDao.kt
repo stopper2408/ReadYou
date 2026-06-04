@@ -12,6 +12,7 @@ import androidx.room.Transaction
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 import me.ash.reader.domain.model.article.Article
+import me.ash.reader.domain.model.article.ArticleContentUpdate
 import me.ash.reader.domain.model.article.ArticleMeta
 import me.ash.reader.domain.model.article.ArticleWithFeed
 import me.ash.reader.domain.model.feed.Feed
@@ -916,5 +917,50 @@ interface ArticleDao {
         ).associateBy { it.link }
 
         return articles.filterNot { existingArticles.containsKey(it.link) }.also { insertList(it) }
+    }
+
+    @Transaction
+    suspend fun batchMarkAsReadTransactional(accountId: Int, articleIds: Set<String>, isUnread: Boolean) {
+        articleIds.chunked(500).forEach { chunk ->
+            markAsReadByIdSet(accountId, chunk.toSet(), isUnread)
+        }
+    }
+
+    @Update(entity = Article::class)
+    suspend fun updateArticleContents(updates: List<ArticleContentUpdate>)
+
+    @Transaction
+    suspend fun upsertArticlesSync(articles: List<Article>) {
+        if (articles.isEmpty()) return
+        val existingMeta = queryMetadataAll(articles.first().accountId)
+        val existingIds = existingMeta.map { it.id }.toSet()
+        
+        val newArticles = articles.filter { it.id !in existingIds }
+        val existingArticles = articles.filter { it.id in existingIds }
+
+        if (newArticles.isNotEmpty()) {
+            insertList(newArticles)
+        }
+
+        if (existingArticles.isNotEmpty()) {
+            val updates = existingArticles.map {
+                ArticleContentUpdate(
+                    id = it.id,
+                    date = it.date,
+                    title = it.title,
+                    author = it.author,
+                    rawDescription = it.rawDescription,
+                    shortDescription = it.shortDescription,
+                    fullContent = it.fullContent,
+                    img = it.img,
+                    link = it.link,
+                    feedId = it.feedId,
+                    accountId = it.accountId,
+                    isReadLater = it.isReadLater,
+                    updateAt = it.updateAt
+                )
+            }
+            updateArticleContents(updates)
+        }
     }
 }
