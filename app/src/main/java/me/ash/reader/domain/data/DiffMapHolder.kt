@@ -29,6 +29,7 @@ import me.ash.reader.infrastructure.di.ApplicationScope
 import me.ash.reader.infrastructure.di.IODispatcher
 import java.io.File
 import javax.inject.Inject
+import timber.log.Timber
 
 private const val TAG = "DiffMapHolder"
 
@@ -218,43 +219,30 @@ class DiffMapHolder @Inject constructor(
     }
 
     private fun writeDiffsToCache() {
-        applicationScope.launch(ioDispatcher) {
-            try {
-                if (diffMap.isEmpty()) {
-                    if (cacheFile.exists() && cacheFile.canWrite()) {
-                        cacheFile.delete()
-                    }
-                    return@launch
-                }
-                val tmpJson = gson.toJson(diffMap)
-                userCacheDir.mkdirs()
-                cacheFile.createNewFile()
-                if (cacheFile.exists() && cacheFile.canWrite()) {
-                    cacheFile.writeText(tmpJson)
-                }
-            } catch (_: Exception) {
-
-            }
-        }
+        writeCacheFile(cacheFile, diffMap.toMap(), "diffs")
     }
 
     private fun writePendingSyncsToCache() {
+        writeCacheFile(pendingSyncCacheFile, pendingSyncDiffs.toMap(), "pending syncs")
+    }
+
+    private fun writeCacheFile(file: File, data: Map<String, Diff>, label: String) {
         applicationScope.launch(ioDispatcher) {
             try {
-                if (pendingSyncDiffs.isEmpty()) {
-                    if (pendingSyncCacheFile.exists() && pendingSyncCacheFile.canWrite()) {
-                        pendingSyncCacheFile.delete()
+                if (data.isEmpty()) {
+                    if (file.exists() && file.canWrite()) {
+                        file.delete()
                     }
                     return@launch
                 }
-                val tmpJson = gson.toJson(pendingSyncDiffs)
+                val tmpJson = gson.toJson(data)
                 userCacheDir.mkdirs()
-                pendingSyncCacheFile.createNewFile()
-                if (pendingSyncCacheFile.exists() && pendingSyncCacheFile.canWrite()) {
-                    pendingSyncCacheFile.writeText(tmpJson)
+                file.createNewFile()
+                if (file.exists() && file.canWrite()) {
+                    file.writeText(tmpJson)
                 }
-            } catch (_: Exception) {
-
+            } catch (e: Exception) {
+                Timber.tag(TAG).e(e, "Failed to write $label cache")
             }
         }
     }
