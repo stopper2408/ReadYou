@@ -8,6 +8,7 @@ import com.google.gson.reflect.TypeToken
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -301,7 +302,7 @@ class DiffMapHolder @Inject constructor(
                 diffMapFromCache?.let {
                     diffMap.clear()
                     diffMap.putAll(it)
-                    if (shouldSyncWithRemote && pendingSyncDiffs.isEmpty()) {
+                    if (shouldSyncWithRemote) {
                         it.values.forEach { diff -> appendDiffToSync(diff) }
                         writePendingSyncsToCache()
                     }
@@ -344,10 +345,12 @@ class DiffMapHolder @Inject constructor(
             appliedDiffs.filter { it.isUnread }.map { it.articleId }.toSet()
         rssService.get().batchMarkAsRead(articleIds = markAsReadArticles, isUnread = false)
         rssService.get().batchMarkAsRead(articleIds = markAsUnreadArticles, isUnread = true)
-        appliedDiffs.forEach { diff ->
-            val current = diffMap[diff.articleId]
-            if (current != null && current.isUnread == diff.isUnread) {
-                diffMap.remove(diff.articleId)
+        withContext(Dispatchers.Main) {
+            appliedDiffs.forEach { diff ->
+                val current = diffMap[diff.articleId]
+                if (current != null && current.isUnread == diff.isUnread) {
+                    diffMap.remove(diff.articleId)
+                }
             }
         }
         writeDiffsToCache()
