@@ -97,8 +97,10 @@ class DiffMapHolder @Inject constructor(
         remoteJob?.cancel()
         writeDiffsToCache()
         writePendingSyncsToCache()
-        diffMap.clear()
-        pendingSyncDiffs.clear()
+        applicationScope.launch(Dispatchers.Main) {
+            diffMap.clear()
+            pendingSyncDiffs.clear()
+        }
         syncedDiffs.clear()
     }
 
@@ -197,9 +199,8 @@ class DiffMapHolder @Inject constructor(
             writePendingSyncsToCache()
         }
         writeDiffsToCache()
-        cancelNotificationsForRead(appliedDiffs, clearGroupSummary)
         applicationScope.launch(ioDispatcher) {
-            persistDiffsToDb(appliedDiffs)
+            persistDiffsToDb(appliedDiffs, clearGroupSummary)
         }
     }
 
@@ -212,7 +213,7 @@ class DiffMapHolder @Inject constructor(
 
     fun commitDiffsToDb() {
         applicationScope.launch(ioDispatcher) {
-            persistDiffsToDb(diffMap.values.toList())
+            persistDiffsToDb(diffMap.values.toList(), clearGroupSummary = false)
         }
     }
 
@@ -286,7 +287,9 @@ class DiffMapHolder @Inject constructor(
                     runCatching { unread.await() }.getOrElse { emptySet() }
         }
 
-        pendingSyncDiffs -= synced
+        withContext(Dispatchers.Main) {
+            pendingSyncDiffs -= synced
+        }
         syncedDiffs += diffs.filter { synced.contains(it.key) }
         writePendingSyncsToCache()
     }
@@ -300,10 +303,19 @@ class DiffMapHolder @Inject constructor(
                     tmpJson, mapType
                 )
                 diffMapFromCache?.let {
-                    diffMap.clear()
-                    diffMap.putAll(it)
+                    withContext(Dispatchers.Main) {
+                        diffMap.clear()
+                        diffMap.putAll(it)
+                    }
                     if (shouldSyncWithRemote) {
-                        it.values.forEach { diff -> appendDiffToSync(diff) }
+                        withContext(Dispatchers.Main) {
+                            it.values.forEach { diff ->
+                                val pending = pendingSyncDiffs[diff.articleId]
+                                if (pending == null || pending.isUnread != diff.isUnread) {
+                                    appendDiffToSync(diff)
+                                }
+                            }
+                        }
                         writePendingSyncsToCache()
                     }
                 }
@@ -320,7 +332,9 @@ class DiffMapHolder @Inject constructor(
                 val mapType = object : TypeToken<Map<String, Diff>>() {}.type
                 val pendingFromCache = gson.fromJson<Map<String, Diff>>(tmpJson, mapType)
                 pendingFromCache?.let {
-                    pendingSyncDiffs.putAll(it)
+                    withContext(Dispatchers.Main) {
+                        pendingSyncDiffs.putAll(it)
+                    }
                 }
             }
         }
@@ -337,7 +351,10 @@ class DiffMapHolder @Inject constructor(
         }
     }
 
-    private suspend fun persistDiffsToDb(appliedDiffs: List<Diff>) {
+    private suspend fun persistDiffsToDb(
+        appliedDiffs: List<Diff>,
+        clearGroupSummary: Boolean,
+    ) {
         if (appliedDiffs.isEmpty()) return
         val markAsReadArticles =
             appliedDiffs.filter { !it.isUnread }.map { it.articleId }.toSet()
@@ -345,6 +362,7 @@ class DiffMapHolder @Inject constructor(
             appliedDiffs.filter { it.isUnread }.map { it.articleId }.toSet()
         rssService.get().batchMarkAsRead(articleIds = markAsReadArticles, isUnread = false)
         rssService.get().batchMarkAsRead(articleIds = markAsUnreadArticles, isUnread = true)
+        cancelNotificationsForRead(appliedDiffs, clearGroupSummary)
         withContext(Dispatchers.Main) {
             appliedDiffs.forEach { diff ->
                 val current = diffMap[diff.articleId]
