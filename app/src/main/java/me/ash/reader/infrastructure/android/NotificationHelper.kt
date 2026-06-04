@@ -11,7 +11,6 @@ import androidx.core.graphics.drawable.toBitmapOrNull
 import coil.imageLoader
 import coil.request.ImageRequest
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.util.Random
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -46,6 +45,12 @@ constructor(
             )
         }
 
+    private fun feedGroupKey(feedId: String) = "feed:$feedId"
+
+    private fun feedSummaryNotificationId(feedId: String) = "feed:$feedId".hashCode()
+
+    private fun articleNotificationId(articleId: String) = "article:$articleId".hashCode()
+
     fun notify(feed: Feed, articles: List<Article>) {
         if (!notificationManager.areNotificationsEnabled()) return
         if (articles.isEmpty()) return
@@ -63,8 +68,9 @@ constructor(
                     }
                 }
 
+            val groupKey = feedGroupKey(feed.id)
             notificationManager.notify(
-                feed.id.hashCode(),
+                feedSummaryNotificationId(feed.id),
                 NotificationCompat.Builder(context, NotificationGroupName.ARTICLE_UPDATE)
                     .setContentTitle(feed.name)
                     .setContentText(
@@ -72,12 +78,27 @@ constructor(
                     )
                     .setSmallIcon(R.drawable.ic_notification)
                     .setStyle(NotificationCompat.InboxStyle().setSummaryText(feed.name))
-                    .setGroup(feed.id)
+                    .setGroup(groupKey)
                     .setGroupSummary(true)
+                    .setAutoCancel(true)
+                    .setContentIntent(
+                        PendingIntent.getActivity(
+                            context,
+                            feedSummaryNotificationId(feed.id),
+                            Intent(context, MainActivity::class.java).apply {
+                                flags =
+                                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                                        Intent.FLAG_ACTIVITY_CLEAR_TASK
+                                putExtra(ExtraName.FEED_ID, feed.id)
+                            },
+                            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                        )
+                    )
                     .build(),
             )
 
             articles.asReversed().forEachIndexed { _, article ->
+                val notificationId = articleNotificationId(article.id)
                 val builder =
                     NotificationCompat.Builder(context, NotificationGroupName.ARTICLE_UPDATE)
                         .setSmallIcon(R.drawable.ic_notification)
@@ -89,7 +110,7 @@ constructor(
                         .setContentIntent(
                             PendingIntent.getActivity(
                                 context,
-                                Random().nextInt() + article.id.hashCode(),
+                                notificationId,
                                 Intent(context, MainActivity::class.java).apply {
                                     flags =
                                         Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -99,9 +120,9 @@ constructor(
                                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
                             )
                         )
-                        .setGroup(feed.id)
+                        .setGroup(groupKey)
                 notificationManager.notify(
-                    Random().nextInt() + article.id.hashCode(),
+                    notificationId,
                     builder.build(),
                 )
             }
@@ -110,5 +131,21 @@ constructor(
 
     fun notify(feedWithArticle: FeedWithArticle) {
         notify(feedWithArticle.feed, feedWithArticle.articles)
+    }
+
+    fun cancelArticleNotification(articleId: String) {
+        notificationManager.cancel(articleNotificationId(articleId))
+    }
+
+    fun cancelArticleNotifications(articleIds: Collection<String>) {
+        articleIds.forEach { notificationManager.cancel(articleNotificationId(it)) }
+    }
+
+    fun cancelFeedSummaryNotification(feedId: String) {
+        notificationManager.cancel(feedSummaryNotificationId(feedId))
+    }
+
+    fun cancelAllNotifications() {
+        notificationManager.cancelAll()
     }
 }

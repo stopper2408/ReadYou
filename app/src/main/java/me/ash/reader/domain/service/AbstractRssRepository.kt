@@ -100,6 +100,53 @@ abstract class AbstractRssRepository(
         isUnread: Boolean,
     ) {
         val accountId = accountService.getCurrentAccountId()
+        val articleIdsToCancel =
+            if (!isUnread) {
+                when {
+                    groupId != null -> {
+                        val metadata =
+                            if (before == null) {
+                                articleDao.queryMetadataByGroupIdWhenIsUnread(
+                                    accountId,
+                                    groupId,
+                                    true,
+                                )
+                            } else {
+                                articleDao.queryMetadataByGroupIdWhenIsUnread(
+                                    accountId,
+                                    groupId,
+                                    true,
+                                    before,
+                                )
+                            }
+                        metadata.map { it.id }
+                    }
+
+                    feedId != null -> {
+                        val metadata =
+                            if (before == null) {
+                                articleDao.queryMetadataByFeedId(accountId, feedId, true)
+                            } else {
+                                articleDao.queryMetadataByFeedId(accountId, feedId, true, before)
+                            }
+                        metadata.map { it.id }
+                    }
+
+                    articleId != null -> listOf(articleId)
+
+                    else -> {
+                        val metadata =
+                            if (before == null) {
+                                articleDao.queryMetadataAll(accountId, isUnread = true)
+                            } else {
+                                articleDao.queryMetadataAll(accountId, isUnread = true, before)
+                            }
+                        metadata.map { it.id }
+                    }
+                }
+            } else {
+                emptyList()
+            }
         when {
             groupId != null -> {
                 articleDao.markAllAsReadByGroupId(
@@ -125,6 +172,20 @@ abstract class AbstractRssRepository(
 
             else -> {
                 articleDao.markAllAsRead(accountId, isUnread, before ?: Date(Long.MAX_VALUE))
+            }
+        }
+        if (!isUnread) {
+            notificationHelper.cancelArticleNotifications(articleIdsToCancel)
+            if (before == null) {
+                when {
+                    feedId != null -> notificationHelper.cancelFeedSummaryNotification(feedId)
+                    groupId != null ->
+                        feedDao
+                            .queryByGroupId(accountId, groupId)
+                            .forEach { notificationHelper.cancelFeedSummaryNotification(it.id) }
+
+                    articleId == null -> notificationHelper.cancelAllNotifications()
+                }
             }
         }
     }

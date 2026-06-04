@@ -206,7 +206,11 @@ constructor(
                     .filterIsInstance<ArticleFlowItem.Article>()
                     .map { it.articleWithFeed }
 
-            diffMapHolder.updateDiff(articleWithFeed = items.toTypedArray(), isUnread = false)
+            diffMapHolder.updateDiff(
+                articleWithFeed = items.toTypedArray(),
+                isUnread = false,
+                clearGroupSummary = true,
+            )
         }
     }
 
