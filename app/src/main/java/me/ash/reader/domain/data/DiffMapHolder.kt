@@ -13,7 +13,9 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.stateIn
@@ -44,6 +46,9 @@ class DiffMapHolder @Inject constructor(
 
     private val pendingSyncDiffs = mutableStateMapOf<String, Diff>()
     private val syncedDiffs = mutableMapOf<String, Diff>()
+
+    private val _readArticleEventFlow = MutableSharedFlow<Diff>(extraBufferCapacity = 64)
+    val readArticleEventFlow = _readArticleEventFlow.asSharedFlow()
 
     val diffMapSnapshotFlow = snapshotFlow { diffMap.toMap() }.stateIn(
         applicationScope, SharingStarted.Eagerly, emptyMap()
@@ -100,7 +105,7 @@ class DiffMapHolder @Inject constructor(
 
     private fun commitOnChange() {
         dbJob = applicationScope.launch(ioDispatcher) {
-            diffMapSnapshotFlow.debounce(2_000).collect {
+            diffMapSnapshotFlow.collect {
                 if (it.isNotEmpty()) {
                     writeDiffsToCache()
                 }
@@ -186,6 +191,11 @@ class DiffMapHolder @Inject constructor(
         if (shouldSyncWithRemote) {
             appliedDiffs.forEach {
                 appendDiffToSync(it)
+            }
+        }
+        appliedDiffs.forEach {
+            if (!it.isUnread) {
+                _readArticleEventFlow.tryEmit(it)
             }
         }
     }

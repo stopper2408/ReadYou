@@ -12,6 +12,9 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.withContext
 import me.ash.reader.BuildConfig
 import me.ash.reader.domain.data.DiffMapHolder
@@ -106,6 +109,18 @@ class AndroidApp : Application(), Configuration.Provider {
             checkUpdate()
         }
         Coil.setImageLoader(imageLoader)
+
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStop(owner: LifecycleOwner) {
+                diffMapHolder.commitDiffsToDb()
+            }
+        })
+
+        applicationScope.launch(ioDispatcher) {
+            diffMapHolder.readArticleEventFlow.collect { diff ->
+                notificationHelper.cancelArticleNotification(diff.articleId, diff.feedId)
+            }
+        }
     }
 
     /** Override the [Configuration.Builder] to provide the [HiltWorkerFactory]. */

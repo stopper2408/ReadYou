@@ -63,6 +63,16 @@ constructor(
                     }
                 }
 
+            val groupIntent = PendingIntent.getActivity(
+                context,
+                feed.id.hashCode(),
+                Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                    putExtra(ExtraName.FEED_ID, feed.id)
+                },
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+
             notificationManager.notify(
                 feed.id.hashCode(),
                 NotificationCompat.Builder(context, NotificationGroupName.ARTICLE_UPDATE)
@@ -74,6 +84,7 @@ constructor(
                     .setStyle(NotificationCompat.InboxStyle().setSummaryText(feed.name))
                     .setGroup(feed.id)
                     .setGroupSummary(true)
+                    .setContentIntent(groupIntent)
                     .build(),
             )
 
@@ -89,7 +100,7 @@ constructor(
                         .setContentIntent(
                             PendingIntent.getActivity(
                                 context,
-                                Random().nextInt() + article.id.hashCode(),
+                                article.id.hashCode(),
                                 Intent(context, MainActivity::class.java).apply {
                                     flags =
                                         Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -101,7 +112,7 @@ constructor(
                         )
                         .setGroup(feed.id)
                 notificationManager.notify(
-                    Random().nextInt() + article.id.hashCode(),
+                    article.id.hashCode(),
                     builder.build(),
                 )
             }
@@ -110,5 +121,21 @@ constructor(
 
     fun notify(feedWithArticle: FeedWithArticle) {
         notify(feedWithArticle.feed, feedWithArticle.articles)
+    }
+
+    fun cancelArticleNotification(articleId: String, feedId: String) {
+        val articleNotificationId = articleId.hashCode()
+        notificationManager.cancel(articleNotificationId)
+
+        val systemManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val activeNotifications = systemManager.activeNotifications
+
+        val remainingInGroup = activeNotifications.count { 
+            it.notification.group == feedId && it.id != feedId.hashCode() 
+        }
+
+        if (remainingInGroup == 0) {
+            notificationManager.cancel(feedId.hashCode())
+        }
     }
 }
