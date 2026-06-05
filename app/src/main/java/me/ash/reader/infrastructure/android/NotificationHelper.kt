@@ -78,7 +78,7 @@ constructor(
                 NotificationCompat.Builder(context, NotificationGroupName.ARTICLE_UPDATE)
                     .setContentTitle(feed.name)
                     .setContentText(
-                        context.resources.getQuantityText(R.plurals.unread_desc, articles.size)
+                        context.resources.getQuantityString(R.plurals.unread_desc, articles.size, articles.size)
                     )
                     .setSmallIcon(R.drawable.ic_notification)
                     .setStyle(NotificationCompat.InboxStyle().setSummaryText(feed.name))
@@ -131,7 +131,7 @@ constructor(
         val activeNotifications = systemManager.activeNotifications
 
         val remainingInGroup = activeNotifications.count { 
-            it.notification.group == feedId && it.id != feedId.hashCode() 
+            it.notification.group == feedId && (it.notification.flags and android.app.Notification.FLAG_GROUP_SUMMARY) == 0 && it.id != articleNotificationId
         }
 
         if (remainingInGroup == 0) {
