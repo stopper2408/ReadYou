@@ -8,10 +8,12 @@ import androidx.work.ListenableWorker
 import androidx.work.WorkManager
 import com.rometools.rome.feed.synd.SyndFeed
 import dagger.hilt.android.qualifiers.ApplicationContext
+import dagger.Lazy
 import java.util.Date
 import javax.inject.Inject
 import kotlin.collections.set
 import kotlinx.coroutines.CoroutineDispatcher
+import me.ash.reader.domain.data.DiffMapHolder
 import kotlinx.coroutines.coroutineScope
 import me.ash.reader.R
 import me.ash.reader.domain.model.account.Account
@@ -52,6 +54,7 @@ constructor(
     @DefaultDispatcher private val defaultDispatcher: CoroutineDispatcher,
     workManager: WorkManager,
     private val accountService: AccountService,
+    private val diffMapHolder: Lazy<DiffMapHolder>,
 ) :
     AbstractRssRepository(
         articleDao,
@@ -279,7 +282,11 @@ constructor(
                 val articleId = meta.id.dollarLast()
                 val shouldBeUnread = unreadArticleIds?.contains(articleId)
                 val shouldBeStarred = starredArticleIds?.contains(articleId)
-                if (meta.isUnread != shouldBeUnread) {
+                
+                // Skip remote status if there are pending local changes
+                val hasPendingReadStatus = diffMapHolder.get().diffMap.containsKey(meta.id)
+                
+                if (meta.isUnread != shouldBeUnread && !hasPendingReadStatus) {
                     articleDao.markAsReadByArticleId(accountId, meta.id, shouldBeUnread ?: true)
                 }
                 if (meta.isStarred != shouldBeStarred) {

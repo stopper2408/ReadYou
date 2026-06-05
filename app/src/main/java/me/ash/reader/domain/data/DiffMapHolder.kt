@@ -50,9 +50,12 @@ class DiffMapHolder @Inject constructor(
     val diffMap = mutableStateMapOf<String, Diff>()
 
     private val pendingSyncDiffs = mutableStateMapOf<String, Diff>()
-    private val syncedDiffs = mutableMapOf<String, Diff>()
+    private val syncedDiffs = java.util.concurrent.ConcurrentHashMap<String, Diff>()
 
-    private val _readArticleEventFlow = MutableSharedFlow<Diff>(extraBufferCapacity = 64)
+    private val _readArticleEventFlow = MutableSharedFlow<Diff>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.SUSPEND
+    )
     val readArticleEventFlow = _readArticleEventFlow.asSharedFlow()
 
     val diffMapSnapshotFlow = snapshotFlow { diffMap.toMap() }.stateIn(
@@ -198,9 +201,12 @@ class DiffMapHolder @Inject constructor(
                 appendDiffToSync(it)
             }
         }
-        appliedDiffs.forEach {
-            if (!it.isUnread) {
-                _readArticleEventFlow.tryEmit(it)
+        val diffsToEmit = appliedDiffs.filter { !it.isUnread }
+        if (diffsToEmit.isNotEmpty()) {
+            applicationScope.launch {
+                diffsToEmit.forEach {
+                    _readArticleEventFlow.emit(it)
+                }
             }
         }
     }
@@ -215,14 +221,15 @@ class DiffMapHolder @Inject constructor(
     fun commitDiffsToDb() {
         applicationScope.launch(ioDispatcher) {
             withContext(NonCancellable) {
-                val markAsReadArticles = diffMap.filter { !it.value.isUnread }.map { it.key }.toSet()
-                val markAsUnreadArticles = diffMap.filter { it.value.isUnread }.map { it.key }.toSet()
+                val currentSnapshot = diffMap.toMap()
+                val markAsReadArticles = currentSnapshot.filter { !it.value.isUnread }.map { it.key }.toSet()
+                val markAsUnreadArticles = currentSnapshot.filter { it.value.isUnread }.map { it.key }.toSet()
                 
                 runCatching {
                     rssService.get().batchMarkAsRead(articleIds = markAsReadArticles, isUnread = false)
                     rssService.get().batchMarkAsRead(articleIds = markAsUnreadArticles, isUnread = true)
                 }.onSuccess {
-                    clearDiffs()
+                    clearDiffs(markAsReadArticles + markAsUnreadArticles)
                 }
             }
         }
@@ -238,8 +245,8 @@ class DiffMapHolder @Inject constructor(
                     if (cacheFile.exists() && cacheFile.canWrite()) {
                         cacheFile.writeText(tmpJson)
                     }
-                } catch (_: Exception) {
-
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
                 }
             }
         }
@@ -297,12 +304,17 @@ class DiffMapHolder @Inject constructor(
         }
     }
 
-    private suspend fun clearDiffs() {
+    private suspend fun clearDiffs(committedIds: Set<String>) {
         fileMutex.withLock {
-            if (cacheFile.exists() && cacheFile.canWrite()) {
-                cacheFile.delete()
+            committedIds.forEach { diffMap.remove(it) }
+            if (diffMap.isEmpty()) {
+                if (cacheFile.exists() && cacheFile.canWrite()) {
+                    cacheFile.delete()
+                }
             }
-            diffMap.clear()
+        }
+        if (diffMap.isNotEmpty()) {
+            writeDiffsToCache()
         }
     }
 }
