@@ -18,6 +18,7 @@ import me.ash.reader.domain.model.account.Account
 import me.ash.reader.domain.service.AccountService
 import me.ash.reader.domain.service.OpmlService
 import me.ash.reader.domain.service.RssService
+import me.ash.reader.infrastructure.android.NotificationHelper
 import me.ash.reader.infrastructure.di.ApplicationScope
 import me.ash.reader.infrastructure.di.DefaultDispatcher
 import me.ash.reader.infrastructure.di.IODispatcher
@@ -29,6 +30,7 @@ class AccountViewModel @Inject constructor(
     private val accountService: AccountService,
     private val rssService: RssService,
     private val opmlService: OpmlService,
+    private val notificationHelper: NotificationHelper,
     @IODispatcher
     private val ioDispatcher: CoroutineDispatcher,
     @DefaultDispatcher
@@ -82,6 +84,7 @@ class AccountViewModel @Inject constructor(
 
     fun delete(accountId: Int, callback: () -> Unit = {}) {
         viewModelScope.launch(ioDispatcher) {
+            notificationHelper.cancelAllNotifications()
             accountService.delete(accountId)
             withContext(mainDispatcher) {
                 callback()
@@ -125,6 +128,7 @@ class AccountViewModel @Inject constructor(
 
     fun switchAccount(targetAccount: Account, callback: () -> Unit = {}) {
         viewModelScope.launch(ioDispatcher) {
+            notificationHelper.cancelAllNotifications()
             accountService.switch(targetAccount)
             withContext(mainDispatcher) {
                 callback()

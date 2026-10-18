@@ -99,7 +99,12 @@ android {
         }
     }
     kotlinOptions {
-        freeCompilerArgs = freeCompilerArgs + "-opt-in=kotlin.RequiresOptIn"
+        freeCompilerArgs =
+            freeCompilerArgs +
+                listOf(
+                    "-opt-in=kotlin.RequiresOptIn",
+                    "-Xannotation-default-target=param-property",
+                )
         jvmTarget = JavaVersion.VERSION_11.toString()
     }
     compileOptions {

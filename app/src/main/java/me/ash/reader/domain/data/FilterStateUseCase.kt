@@ -47,10 +47,24 @@ constructor(
     }
 
     fun init(feedId: String?, groupId: String?) {
+        if (feedId == null && groupId == null) {
+            updateFilterState(
+                feed = null,
+                group = null,
+                filter = Filter.Unread,
+                searchContent = null,
+            )
+            return
+        }
         coroutineScope.launch {
             val feed = feedId?.let { feedDao.queryById(it) }
             val group = groupId?.let { groupDao.queryById(it) }
-            updateFilterState(feed = feed, group = group, filter = Filter.Unread)
+            updateFilterState(
+                feed = feed,
+                group = group,
+                filter = Filter.Unread,
+                searchContent = null,
+            )
         }
     }
 }

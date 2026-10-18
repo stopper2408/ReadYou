@@ -170,24 +170,28 @@ fun ReadingPage(
                                     ))
                         },
                         label = "",
-                    ) {
-                        remember { it }
+                    ) { animatedReaderState ->
+                        remember(animatedReaderState) { animatedReaderState }
                             .run {
+                                val canLoadNext = nextArticle != null
+                                val canLoadPrev = previousArticle != null
                                 val state =
                                     rememberPullToLoadState(
-                                        key = content,
+                                        key = articleId to content,
                                         onLoadNext =
-                                            if (isNextArticleAvailable) {
+                                            if (canLoadNext) {
                                                 {
-                                                    val (id, index) = readerState.nextArticle
-                                                    onLoadArticle(id, index)
+                                                    nextArticle?.let { (id, index) ->
+                                                        onLoadArticle(id, index)
+                                                    }
                                                 }
                                             } else null,
                                         onLoadPrevious =
-                                            if (isPreviousArticleAvailable) {
+                                            if (canLoadPrev) {
                                                 {
-                                                    val (id, index) = readerState.previousArticle
-                                                    onLoadArticle(id, index)
+                                                    previousArticle?.let { (id, index) ->
+                                                        onLoadArticle(id, index)
+                                                    }
                                                 }
                                             } else null,
                                     )
@@ -269,8 +273,8 @@ fun ReadingPage(
                                         )
                                         PullToLoadIndicator(
                                             state = state,
-                                            canLoadPrevious = isPreviousArticleAvailable,
-                                            canLoadNext = isNextArticleAvailable,
+                                            canLoadPrevious = canLoadPrev,
+                                            canLoadNext = canLoadNext,
                                         )
                                     }
                                 }

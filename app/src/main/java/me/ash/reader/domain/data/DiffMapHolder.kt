@@ -3,35 +3,41 @@ package me.ash.reader.domain.data
 import android.content.Context
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.Snapshot
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import me.ash.reader.domain.model.account.Account
 import me.ash.reader.domain.model.account.AccountType
 import me.ash.reader.domain.model.article.ArticleWithFeed
 import me.ash.reader.domain.service.AccountService
 import me.ash.reader.domain.service.RssService
+import me.ash.reader.infrastructure.android.NotificationHelper
 import me.ash.reader.infrastructure.di.ApplicationScope
 import me.ash.reader.infrastructure.di.IODispatcher
+import me.ash.reader.ui.ext.currentAccountId
 import java.io.File
 import javax.inject.Inject
+import javax.inject.Singleton
 
 private const val TAG = "DiffMapHolder"
 
+@Singleton
 @OptIn(FlowPreview::class)
 class DiffMapHolder @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -39,11 +45,14 @@ class DiffMapHolder @Inject constructor(
     @IODispatcher private val ioDispatcher: CoroutineDispatcher,
     private val accountService: AccountService,
     private val rssService: RssService,
+    private val notificationHelper: NotificationHelper,
 ) {
     val diffMap = mutableStateMapOf<String, Diff>()
 
     private val pendingSyncDiffs = mutableStateMapOf<String, Diff>()
     private val syncedDiffs = mutableMapOf<String, Diff>()
+    private val mutex = Mutex()
+    private val cacheLock = Any()
 
     val diffMapSnapshotFlow = snapshotFlow { diffMap.toMap() }.stateIn(
         applicationScope, SharingStarted.Eagerly, emptyMap()
@@ -58,7 +67,8 @@ class DiffMapHolder @Inject constructor(
     private val gson = Gson()
 
     private val cacheDir = context.cacheDir.resolve("diff")
-    private var userCacheDir = cacheDir
+    @Volatile
+    private var userCacheDir = cacheDir.resolve(context.currentAccountId.toString())
 
     private var currentAccount: Account? = null
 
@@ -68,6 +78,7 @@ class DiffMapHolder @Inject constructor(
     var remoteJob: Job? = null
 
     init {
+        commitDiffsToDb()
         applicationScope.launch {
             accountService.currentAccountFlow.mapNotNull { it }.collect { account ->
                 val previousAccount = currentAccount
@@ -92,15 +103,17 @@ class DiffMapHolder @Inject constructor(
     private fun cleanup(account: Account) {
         dbJob?.cancel()
         remoteJob?.cancel()
-        writeDiffsToCache()
-        diffMap.clear()
-        pendingSyncDiffs.clear()
+        commitDiffsToDb()
+        Snapshot.withMutableSnapshot {
+            pendingSyncDiffs.clear()
+        }
         syncedDiffs.clear()
     }
 
     private fun commitOnChange() {
+        dbJob?.cancel()
         dbJob = applicationScope.launch(ioDispatcher) {
-            diffMapSnapshotFlow.debounce(2_000).collect {
+            diffMapSnapshotFlow.debounce(500).collect {
                 if (it.isNotEmpty()) {
                     writeDiffsToCache()
                 }
@@ -109,6 +122,7 @@ class DiffMapHolder @Inject constructor(
     }
 
     private fun syncOnChange() {
+        remoteJob?.cancel()
         remoteJob = applicationScope.launch(ioDispatcher) {
             pendingSyncDiffsSnapshotFlow.debounce(2_000).collect {
                 withContext(ioDispatcher) {
@@ -120,6 +134,14 @@ class DiffMapHolder @Inject constructor(
 
     fun checkIfUnread(articleWithFeed: ArticleWithFeed): Boolean {
         return diffMap[articleWithFeed.article.id]?.isUnread ?: articleWithFeed.article.isUnread
+    }
+
+    fun removeDiff(articleId: String) {
+        Snapshot.withMutableSnapshot {
+            diffMap.remove(articleId)
+            pendingSyncDiffs.remove(articleId)
+        }
+        writeDiffsToCache()
     }
 
     /**
@@ -162,16 +184,18 @@ class DiffMapHolder @Inject constructor(
         val diff = diffMap[articleId]
 
         if (diff == null) {
-            val isUnread = isUnread ?: !articleWithFeed.article.isUnread
-            val diff = Diff(
-                isUnread = isUnread, articleWithFeed = articleWithFeed
-            )
-            diffMap[articleId] = diff
-            return diff
+            val targetUnread = isUnread ?: !articleWithFeed.article.isUnread
+            if (targetUnread != articleWithFeed.article.isUnread) {
+                val newDiff = Diff(
+                    isUnread = targetUnread, articleWithFeed = articleWithFeed
+                )
+                diffMap[articleId] = newDiff
+                return newDiff
+            }
         } else {
             if (isUnread == null || diff.isUnread != isUnread) {
-                val diff = diffMap.remove(articleId)
-                return diff?.copy(isUnread = !diff.isUnread)
+                val removedDiff = diffMap.remove(articleId)
+                return removedDiff?.copy(isUnread = !diff.isUnread)
             }
         }
         return null
@@ -180,14 +204,90 @@ class DiffMapHolder @Inject constructor(
     fun updateDiff(
         vararg articleWithFeed: ArticleWithFeed, isUnread: Boolean? = null
     ) {
-        val appliedDiffs = articleWithFeed.mapNotNull {
-            updateDiffInternal(it, isUnread)
-        }
-        if (shouldSyncWithRemote) {
-            appliedDiffs.forEach {
-                appendDiffToSync(it)
+        val appliedDiffs = Snapshot.withMutableSnapshot {
+            articleWithFeed.mapNotNull {
+                updateDiffInternal(it, isUnread)
             }
         }
+        val nowUnreadArticles = articleWithFeed.filter { checkIfUnread(it) }
+        if (nowUnreadArticles.isNotEmpty()) {
+            nowUnreadArticles.forEach { notificationHelper.markArticleUnreadInMemory(it.article.id) }
+        }
+        val nowReadArticles = articleWithFeed.filter { !checkIfUnread(it) }
+        if (nowReadArticles.isNotEmpty()) {
+            notificationHelper.cancelNotificationsForArticles(
+                articleIds = nowReadArticles.map { it.article.id },
+                affectedFeedIds = nowReadArticles.map { it.feed.id }.distinct(),
+                markReadInMemory = true,
+            )
+        }
+        if (appliedDiffs.isNotEmpty()) {
+            writeDiffsToCache()
+            if (shouldSyncWithRemote) {
+                Snapshot.withMutableSnapshot {
+                    appliedDiffs.forEach {
+                        appendDiffToSync(it)
+                    }
+                }
+            }
+        }
+    }
+
+    fun updateDiff(
+        diffs: Collection<Diff>, isUnread: Boolean = false
+    ) {
+        if (diffs.isEmpty()) return
+        if (!isUnread) {
+            notificationHelper.cancelNotificationsForArticles(
+                articleIds = diffs.map { it.articleId },
+                affectedFeedIds = diffs.map { it.feedId }.distinct(),
+                markReadInMemory = true,
+            )
+        } else {
+            diffs.forEach { notificationHelper.markArticleUnreadInMemory(it.articleId) }
+        }
+        val appliedDiffs = mutableListOf<Diff>()
+        Snapshot.withMutableSnapshot {
+            for (incoming in diffs) {
+                val targetDiff = incoming.copy(isUnread = isUnread)
+                val existing = diffMap[targetDiff.articleId]
+                if (existing == null || existing.isUnread != isUnread) {
+                    diffMap[targetDiff.articleId] = targetDiff
+                    appliedDiffs.add(targetDiff)
+                }
+            }
+        }
+        if (appliedDiffs.isNotEmpty()) {
+            writeDiffsToCache()
+            if (shouldSyncWithRemote) {
+                Snapshot.withMutableSnapshot {
+                    appliedDiffs.forEach {
+                        appendDiffToSync(it)
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelNotificationForArticle(articleId: String, feedId: String? = null) {
+        notificationHelper.cancelNotificationForArticle(
+            articleId = articleId,
+            feedId = feedId,
+            markReadInMemory = true,
+        )
+    }
+
+    fun cancelAllNotifications() {
+        notificationHelper.cancelAllNotifications()
+    }
+
+    fun cancelNotificationsForFeeds(feedIds: Collection<String>) {
+        notificationHelper.cancelNotificationsForFeeds(feedIds)
+    }
+
+    fun cancelNotificationsForGroup(groupId: String) {
+        val accountId = currentAccount?.id ?: context.currentAccountId
+        notificationHelper.cancelNotificationsForGroup(accountId, groupId)
     }
 
     private fun appendDiffToSync(diff: Diff) {
@@ -197,28 +297,105 @@ class DiffMapHolder @Inject constructor(
         }
     }
 
-    fun commitDiffsToDb() {
-        applicationScope.launch(ioDispatcher) {
-            val markAsReadArticles = diffMap.filter { !it.value.isUnread }.map { it.key }.toSet()
-            val markAsUnreadArticles = diffMap.filter { it.value.isUnread }.map { it.key }.toSet()
-            clearDiffs()
-            rssService.get().batchMarkAsRead(articleIds = markAsReadArticles, isUnread = false)
-            rssService.get().batchMarkAsRead(articleIds = markAsUnreadArticles, isUnread = true)
+    fun commitDiffsToDb(): Job {
+        return applicationScope.launch(ioDispatcher + NonCancellable) {
+            commitDiffsToDbSuspend()
+        }
+    }
+
+    suspend fun commitDiffsToDbSuspend() {
+        withContext(ioDispatcher + NonCancellable) {
+            mutex.withLock {
+                val cachedDiffs = synchronized(cacheLock) { readCacheFileLocked() }
+                val memorySnapshot = diffMap.toMap()
+                val snapshot = cachedDiffs + memorySnapshot
+                if (snapshot.isEmpty()) {
+                    synchronized(cacheLock) { deleteCacheFileLocked() }
+                    return@withLock
+                }
+                if (shouldSyncWithRemote && cachedDiffs.isNotEmpty()) {
+                    Snapshot.withMutableSnapshot {
+                        cachedDiffs.values.forEach { appendDiffToSync(it) }
+                    }
+                }
+                val markAsReadArticles =
+                    snapshot.filter { !it.value.isUnread }.map { it.key }.toSet()
+                val markAsUnreadArticles =
+                    snapshot.filter { it.value.isUnread }.map { it.key }.toSet()
+
+                rssService.get().batchMarkAsRead(articleIds = markAsReadArticles, isUnread = false)
+                rssService.get().batchMarkAsRead(articleIds = markAsUnreadArticles, isUnread = true)
+
+                Snapshot.withMutableSnapshot {
+                    snapshot.forEach { (key, committedDiff) ->
+                        if (diffMap[key] == committedDiff) {
+                            diffMap.remove(key)
+                        }
+                    }
+                }
+                synchronized(cacheLock) {
+                    writeOrDeleteCacheFileLocked(diffMap.toMap())
+                }
+            }
+        }
+    }
+
+    fun writeDiffsToCacheSync() {
+        val snapshot = diffMap.toMap()
+        synchronized(cacheLock) {
+            if (snapshot.isNotEmpty()) {
+                writeOrDeleteCacheFileLocked(snapshot)
+            }
         }
     }
 
     private fun writeDiffsToCache() {
-        applicationScope.launch(ioDispatcher) {
-            try {
-                val tmpJson = gson.toJson(diffMap)
+        val snapshot = diffMap.toMap()
+        applicationScope.launch(ioDispatcher + NonCancellable) {
+            synchronized(cacheLock) {
+                writeOrDeleteCacheFileLocked(snapshot)
+            }
+        }
+    }
+
+    private fun readCacheFileLocked(): Map<String, Diff> {
+        try {
+            if (cacheFile.exists() && cacheFile.canRead()) {
+                val tmpJson = cacheFile.readText()
+                if (tmpJson.isNotBlank()) {
+                    val mapType = object : TypeToken<Map<String, Diff>>() {}.type
+                    return gson.fromJson<Map<String, Diff>>(tmpJson, mapType) ?: emptyMap()
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return emptyMap()
+    }
+
+    private fun writeOrDeleteCacheFileLocked(snapshot: Map<String, Diff>) {
+        try {
+            if (snapshot.isEmpty()) {
+                deleteCacheFileLocked()
+            } else {
+                val tmpJson = gson.toJson(snapshot)
                 userCacheDir.mkdirs()
-                cacheFile.createNewFile()
+                if (!cacheFile.exists()) {
+                    cacheFile.createNewFile()
+                }
                 if (cacheFile.exists() && cacheFile.canWrite()) {
                     cacheFile.writeText(tmpJson)
                 }
-            } catch (_: Exception) {
-
             }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun deleteCacheFileLocked() {
+        try {
+            if (cacheFile.exists() && cacheFile.canWrite()) {
+                cacheFile.delete()
+            }
+        } catch (_: Exception) {
         }
     }
 
@@ -250,35 +427,14 @@ class DiffMapHolder @Inject constructor(
                     runCatching { unread.await() }.getOrElse { emptySet() }
         }
 
-        pendingSyncDiffs -= synced
+        Snapshot.withMutableSnapshot {
+            pendingSyncDiffs -= synced
+        }
         syncedDiffs += diffs.filter { synced.contains(it.key) }
     }
 
     private fun commitDiffsFromCache() {
-        applicationScope.launch(ioDispatcher) {
-            if (cacheFile.exists() && cacheFile.canRead()) {
-                val tmpJson = cacheFile.readText()
-                val mapType = object : TypeToken<Map<String, Diff>>() {}.type
-                val diffMapFromCache = gson.fromJson<Map<String, Diff>>(
-                    tmpJson, mapType
-                )
-                diffMapFromCache?.let {
-                    diffMap.clear()
-                    diffMap.putAll(it)
-                }
-            }
-        }.invokeOnCompletion {
-            commitDiffsToDb()
-        }
-    }
-
-    private fun clearDiffs() {
-        applicationScope.launch(ioDispatcher) {
-            if (cacheFile.exists() && cacheFile.canWrite()) {
-                cacheFile.delete()
-            }
-            diffMap.clear()
-        }
+        commitDiffsToDb()
     }
 }
 

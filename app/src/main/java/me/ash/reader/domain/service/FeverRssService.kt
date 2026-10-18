@@ -259,36 +259,64 @@ constructor(
                 }
             }
 
-            if (allArticles.isNotEmpty()) {
-                articleDao.insert(*allArticles.toTypedArray())
-                val notificationFeeds =
-                    feedDao.queryNotificationEnabled(accountId).associateBy { it.id }
-                val notificationFeedIds = notificationFeeds.keys
-                allArticles
-                    .fastFilter { it.isUnread && it.feedId in notificationFeedIds }
-                    .groupBy { it.feedId }
-                    .mapKeys { (feedId, _) -> notificationFeeds[feedId]!! }
-                    .forEach { (feed, articles) -> notificationHelper.notify(feed, articles) }
-            }
+            val newlyInsertedArticles =
+                if (allArticles.isNotEmpty()) {
+                    val rowIds = articleDao.insertList(allArticles)
+                    allArticles.filterIndexed { index, _ -> rowIds.getOrNull(index) != -1L }
+                } else {
+                    emptyList()
+                }
 
             // 4. Synchronize read/unread and starred/un-starred
-            val unreadArticleIds = feverAPI.getUnreadItems().unread_item_ids?.split(",")
-            val starredArticleIds = feverAPI.getSavedItems().saved_item_ids?.split(",")
+            val unreadArticleIds = feverAPI.getUnreadItems().unread_item_ids?.split(",")?.toSet()
+            val starredArticleIds = feverAPI.getSavedItems().saved_item_ids?.split(",")?.toSet()
             val articleMeta = articleDao.queryMetadataAll(accountId)
+            val newlyReadDbIds = mutableListOf<String>()
+            val newlyUnreadDbIds = mutableListOf<String>()
             for (meta: ArticleMeta in articleMeta) {
                 val articleId = meta.id.dollarLast()
-                val shouldBeUnread = unreadArticleIds?.contains(articleId)
-                val shouldBeStarred = starredArticleIds?.contains(articleId)
+                val shouldBeUnread = unreadArticleIds?.contains(articleId) ?: false
+                val shouldBeStarred = starredArticleIds?.contains(articleId) ?: false
                 if (meta.isUnread != shouldBeUnread) {
-                    articleDao.markAsReadByArticleId(accountId, meta.id, shouldBeUnread ?: true)
+                    articleDao.markAsReadByArticleId(accountId, meta.id, shouldBeUnread)
+                    if (!shouldBeUnread) {
+                        newlyReadDbIds.add(meta.id)
+                    } else {
+                        newlyUnreadDbIds.add(meta.id)
+                    }
                 }
                 if (meta.isStarred != shouldBeStarred) {
                     articleDao.markAsStarredByArticleId(
                         accountId,
                         meta.id,
-                        shouldBeStarred ?: false,
+                        shouldBeStarred,
                     )
                 }
+            }
+
+            if (newlyUnreadDbIds.isNotEmpty()) {
+                newlyUnreadDbIds.forEach { notificationHelper.markArticleUnreadInMemory(it) }
+            }
+            if (newlyReadDbIds.isNotEmpty()) {
+                notificationHelper.cancelNotificationsForArticles(newlyReadDbIds)
+            }
+
+            if (newlyInsertedArticles.isNotEmpty()) {
+                val notificationFeeds =
+                    feedDao.queryNotificationEnabled(accountId).associateBy { it.id }
+                val notificationFeedIds = notificationFeeds.keys
+                val newlyReadSet = newlyReadDbIds.toSet()
+                newlyInsertedArticles
+                    .fastFilter {
+                        val isStillUnread =
+                            (unreadArticleIds?.contains(it.id.dollarLast()) ?: it.isUnread) &&
+                                !newlyReadSet.contains(it.id)
+                        isStillUnread && it.feedId in notificationFeedIds
+                    }
+                    .map { it.copy(isUnread = true) }
+                    .groupBy { it.feedId }
+                    .mapKeys { (feedId, _) -> notificationFeeds[feedId]!! }
+                    .forEach { (feed, articles) -> notificationHelper.notify(feed, articles) }
             }
 
             // Remove orphaned groups and feeds, after synchronizing the starred/un-starred

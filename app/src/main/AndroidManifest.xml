@@ -144,6 +144,13 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/article_card_widget_info" />
         </receiver>
+        <receiver
+            android:name=".infrastructure.android.NotificationActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="me.ash.reader.action.MARK_AS_READ" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

@@ -6,5 +6,6 @@ object ExtraName {
     const val FEED_ID: String = "feed.id"
     const val GROUP_ID: String = "group.id"
 
-    const val ACCOUNT_ID:String = "account.id"
+    const val ACCOUNT_ID: String = "account.id"
+    const val OPEN_UNREAD_FLOW: String = "open.unread.flow"
 }

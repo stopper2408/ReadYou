@@ -10,8 +10,10 @@ import java.util.Date
 import java.util.UUID
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
 import me.ash.reader.domain.model.account.Account
 import me.ash.reader.domain.model.article.ArchivedArticle
 import me.ash.reader.domain.model.article.Article
@@ -98,16 +100,47 @@ abstract class AbstractRssRepository(
         articleId: String?,
         before: Date?,
         isUnread: Boolean,
-    ) {
+    ) = withContext(dispatcherIO + NonCancellable) {
         val accountId = accountService.getCurrentAccountId()
+        val effectiveBefore = before ?: Date(Long.MAX_VALUE)
+        val isAllTime = before == null || effectiveBefore.time == Long.MAX_VALUE || effectiveBefore.time >= System.currentTimeMillis()
+        if (!isUnread) {
+            if (groupId == null && feedId == null && articleId == null && isAllTime) {
+                notificationHelper.cancelAllNotifications()
+            } else if (groupId != null && feedId == null && articleId == null && isAllTime) {
+                notificationHelper.cancelNotificationsForGroup(accountId, groupId)
+            } else if (feedId != null && articleId == null && isAllTime) {
+                notificationHelper.cancelNotificationsForFeed(feedId)
+            } else if (articleId != null) {
+                notificationHelper.cancelNotificationForArticle(articleId, feedId)
+            } else {
+                val unreadDiffs =
+                    articleDao.queryUnreadDiffsToMarkAsRead(
+                        accountId = accountId,
+                        groupId = groupId,
+                        feedId = feedId,
+                        articleId = articleId,
+                        before = effectiveBefore,
+                    )
+                if (unreadDiffs.isNotEmpty()) {
+                    notificationHelper.cancelNotificationsForArticles(
+                        articleIds = unreadDiffs.map { it.articleId },
+                        affectedFeedIds = unreadDiffs.map { it.feedId }.distinct(),
+                    )
+                }
+            }
+        }
         when {
             groupId != null -> {
                 articleDao.markAllAsReadByGroupId(
                     accountId = accountId,
                     groupId = groupId,
                     isUnread = isUnread,
-                    before = before ?: Date(Long.MAX_VALUE),
+                    before = effectiveBefore,
                 )
+                if (!isUnread && !isAllTime) {
+                    notificationHelper.reconcileGroupNotifications(accountId, groupId)
+                }
             }
 
             feedId != null -> {
@@ -115,39 +148,68 @@ abstract class AbstractRssRepository(
                     accountId = accountId,
                     feedId = feedId,
                     isUnread = isUnread,
-                    before = before ?: Date(Long.MAX_VALUE),
+                    before = effectiveBefore,
                 )
+                if (!isUnread && !isAllTime) {
+                    notificationHelper.reconcileFeedNotifications(feedId)
+                }
             }
 
             articleId != null -> {
                 articleDao.markAsReadByArticleId(accountId, articleId, isUnread)
+                if (isUnread) {
+                    notificationHelper.markArticleUnreadInMemory(articleId)
+                }
             }
 
             else -> {
-                articleDao.markAllAsRead(accountId, isUnread, before ?: Date(Long.MAX_VALUE))
+                articleDao.markAllAsRead(accountId, isUnread, effectiveBefore)
+                if (!isUnread && !isAllTime) {
+                    notificationHelper.reconcileAllActiveNotifications()
+                }
             }
         }
     }
 
-    open suspend fun batchMarkAsRead(articleIds: Set<String>, isUnread: Boolean) {
-        val accountId = accountService.getCurrentAccountId()
-        articleIds
-            .takeIf { it.isNotEmpty() }
-            ?.chunked(500)
-            ?.forEachIndexed { index, it ->
-                articleDao.markAsReadByIdSet(accountId, it.toSet(), isUnread)
+    open suspend fun batchMarkAsRead(articleIds: Set<String>, isUnread: Boolean) =
+        withContext(dispatcherIO + NonCancellable) {
+            if (articleIds.isEmpty()) return@withContext
+            if (!isUnread) {
+                notificationHelper.cancelNotificationsForArticles(articleIds)
+            } else {
+                articleIds.forEach { notificationHelper.markArticleUnreadInMemory(it) }
             }
-    }
+            val accountId = accountService.getCurrentAccountId()
+            articleDao.batchMarkAsRead(accountId, articleIds, isUnread)
+        }
+
+    open suspend fun queryUnreadDiffsToMarkAsRead(
+        groupId: String?,
+        feedId: String?,
+        articleId: String?,
+        before: Date?,
+    ): List<me.ash.reader.domain.data.Diff> =
+        withContext(dispatcherIO + NonCancellable) {
+            val accountId = accountService.getCurrentAccountId()
+            articleDao.queryUnreadDiffsToMarkAsRead(
+                accountId = accountId,
+                groupId = groupId,
+                feedId = feedId,
+                articleId = articleId,
+                before = before ?: Date(Long.MAX_VALUE),
+            )
+        }
 
     open suspend fun syncReadStatus(articleIds: Set<String>, isUnread: Boolean): Set<String> {
         /* no-op */
         return emptySet()
     }
 
-    open suspend fun markAsStarred(articleId: String, isStarred: Boolean) {
-        val accountId = accountService.getCurrentAccountId()
-        articleDao.markAsStarredByArticleId(accountId, articleId, isStarred)
-    }
+    open suspend fun markAsStarred(articleId: String, isStarred: Boolean) =
+        withContext(dispatcherIO + NonCancellable) {
+            val accountId = accountService.getCurrentAccountId()
+            articleDao.markAsStarredByArticleId(accountId, articleId, isStarred)
+        }
 
     suspend fun clearKeepArchivedArticles(): List<Article> {
         val accountId = accountService.getCurrentAccountId()
@@ -326,6 +388,9 @@ abstract class AbstractRssRepository(
 
     internal suspend fun updateFeed(feed: Feed) {
         feedDao.update(feed)
+        if (!feed.isNotification) {
+            notificationHelper.cancelNotificationsForFeed(feed.id)
+        }
     }
 
     open suspend fun deleteGroup(group: Group, onlyDeleteNoStarred: Boolean? = false) {
@@ -336,6 +401,7 @@ abstract class AbstractRssRepository(
         ) {
             return
         }
+        notificationHelper.cancelNotificationsForGroup(accountId, group.id)
         deleteArticles(group = group, includeStarred = true)
         feedDao.deleteByGroupId(accountId, group.id)
         groupDao.delete(group)
@@ -352,6 +418,7 @@ abstract class AbstractRssRepository(
         ) {
             return
         }
+        notificationHelper.cancelNotificationsForFeed(feed.id)
         deleteArticles(feed = feed, includeStarred = true)
         feedDao.delete(feed)
     }
@@ -361,25 +428,31 @@ abstract class AbstractRssRepository(
         feed: Feed? = null,
         includeStarred: Boolean = false,
     ) {
+        val accountId = accountService.getCurrentAccountId()
         when {
-            group != null ->
+            group != null -> {
                 articleDao.deleteByGroupId(
-                    accountService.getCurrentAccountId(),
+                    accountId,
                     group.id,
                     includeStarred,
                 )
+                notificationHelper.reconcileGroupNotifications(accountId, group.id)
+            }
 
-            feed != null ->
+            feed != null -> {
                 articleDao.deleteByFeedId(
-                    accountService.getCurrentAccountId(),
+                    accountId,
                     feed.id,
                     includeStarred,
                 )
+                notificationHelper.reconcileFeedNotifications(feed.id)
+            }
         }
     }
 
     suspend fun deleteAccountArticles(accountId: Int) {
         articleDao.deleteByAccountId(accountId)
+        notificationHelper.cancelAllNotifications()
     }
 
     suspend fun groupParseFullContent(group: Group, isFullContent: Boolean) {
@@ -395,11 +468,15 @@ abstract class AbstractRssRepository(
     }
 
     suspend fun groupAllowNotification(group: Group, isNotification: Boolean) {
+        val accountId = accountService.getCurrentAccountId()
         feedDao.updateIsNotificationByGroupId(
-            accountService.getCurrentAccountId(),
+            accountId,
             group.id,
             isNotification,
         )
+        if (!isNotification) {
+            notificationHelper.cancelNotificationsForGroup(accountId, group.id)
+        }
     }
 
     suspend fun groupMoveToTargetGroup(group: Group, targetGroup: Group) {

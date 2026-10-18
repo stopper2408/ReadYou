@@ -430,6 +430,10 @@ private fun SwipeActionBox(
         return
     }
 
+    val currentOnSwipeStartToEnd by androidx.compose.runtime.rememberUpdatedState(onSwipeStartToEnd)
+    val currentOnSwipeEndToStart by androidx.compose.runtime.rememberUpdatedState(onSwipeEndToStart)
+    val currentArticleWithFeed by androidx.compose.runtime.rememberUpdatedState(articleWithFeed)
+
     val startAction =
         onSwipeStartToEnd?.let {
             SwipeAction(
@@ -450,7 +454,7 @@ private fun SwipeActionBox(
                 },
                 background = containerColor,
                 isUndo = false,
-                onSwipe = { onSwipeStartToEnd.invoke(articleWithFeed) },
+                onSwipe = { currentOnSwipeStartToEnd?.invoke(currentArticleWithFeed) },
             )
         }
 
@@ -474,7 +478,7 @@ private fun SwipeActionBox(
                 },
                 background = containerColor,
                 isUndo = false,
-                onSwipe = { onSwipeEndToStart.invoke(articleWithFeed) },
+                onSwipe = { currentOnSwipeEndToStart?.invoke(currentArticleWithFeed) },
             )
         }
 

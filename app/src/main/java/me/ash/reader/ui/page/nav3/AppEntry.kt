@@ -13,7 +13,10 @@ import androidx.compose.material3.adaptive.layout.calculatePaneScaffoldDirective
 import androidx.compose.material3.adaptive.navigation.rememberListDetailPaneScaffoldNavigator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
@@ -126,15 +129,29 @@ fun AppEntry(backStack: NavBackStack<NavKey>) {
                     }
                     is Route.Reading -> {
                         NavEntry(key) {
-                            val key = rememberSaveable(saver = Route.Reading.Saver) { key }
+                            val savedKey =
+                                rememberSaveable(key, saver = Route.Reading.Saver) { key }
+                            var hasHandledInitialNavigation by
+                                rememberSaveable(savedKey.articleId, savedKey.launchId) {
+                                    mutableStateOf(false)
+                                }
 
-                            LaunchedEffect(key) {
-                                if (key.articleId != null) {
-                                    delay(50L)
-                                    navigator.navigateTo(
-                                        ListDetailPaneScaffoldRole.Detail,
-                                        ArticleData(key.articleId),
-                                    )
+                            LaunchedEffect(savedKey, hasHandledInitialNavigation) {
+                                if (!hasHandledInitialNavigation) {
+                                    hasHandledInitialNavigation = true
+                                    if (savedKey.articleId != null) {
+                                        delay(50L)
+                                        navigator.navigateTo(
+                                            ListDetailPaneScaffoldRole.Detail,
+                                            ArticleData(savedKey.articleId),
+                                        )
+                                    } else if (
+                                        navigator.currentDestination?.pane ==
+                                            ListDetailPaneScaffoldRole.Detail ||
+                                            navigator.currentDestination?.contentKey != null
+                                    ) {
+                                        navigator.navigateTo(ListDetailPaneScaffoldRole.List)
+                                    }
                                 }
                             }
 

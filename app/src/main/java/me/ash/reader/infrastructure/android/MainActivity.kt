@@ -60,6 +60,8 @@ class MainActivity : AppCompatActivity() {
 
     @Inject lateinit var filterUseCase: FilterStateUseCase
 
+    @Inject lateinit var diffMapHolder: me.ash.reader.domain.data.DiffMapHolder
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.i("RLog", "onCreate: ${ProfileInstallerInitializer().create(this)}")
@@ -104,7 +106,7 @@ class MainActivity : AppCompatActivity() {
                         AppTheme(useDarkTheme = LocalDarkTheme.current.isDarkTheme()) {
                             val isFirstLaunch = remember { isFirstLaunch }
                             val initialPage = remember { initialPage }
-                            val launchAction = intent.getLaunchAction()
+                            val launchAction = remember { intent.getLaunchAction() }
 
                             val startDestination = remember {
                                 if (isFirstLaunch) listOf(Route.Startup)
@@ -117,7 +119,23 @@ class MainActivity : AppCompatActivity() {
                                             )
                                             listOf(
                                                 Route.Feeds,
-                                                Route.Reading(launchAction.articleId),
+                                                Route.Reading(
+                                                    articleId = launchAction.articleId,
+                                                    launchId = System.currentTimeMillis(),
+                                                ),
+                                            )
+                                        }
+                                        is LaunchAction.OpenArticleList -> {
+                                            filterUseCase.init(
+                                                launchAction.feedId,
+                                                launchAction.groupId,
+                                            )
+                                            listOf(
+                                                Route.Feeds,
+                                                Route.Reading(
+                                                    articleId = null,
+                                                    launchId = System.currentTimeMillis(),
+                                                ),
                                             )
                                         }
                                         is LaunchAction.Subscribe -> {
@@ -152,25 +170,26 @@ class MainActivity : AppCompatActivity() {
         backStack: NavBackStack<NavKey>,
         subscribeViewModel: SubscribeViewModel,
     ) {
-        val scope = rememberCoroutineScope()
         DisposableEffect(backStack) {
             val listener =
-                Consumer<Intent> { intent ->
-                    intent.getLaunchAction()?.let { action ->
+                Consumer<Intent> { newIntent ->
+                    newIntent.getLaunchAction()?.let { action ->
                         when (action) {
                             is LaunchAction.OpenArticle -> {
-                                val (articleId, feedId, groupId) = action
+                                val (articleId, feedId, groupId, accountId) = action
+                                if (
+                                    accountId != null &&
+                                        accountId != accountService.getCurrentAccountId()
+                                )
+                                    return@Consumer
                                 filterUseCase.init(feedId, groupId)
-                                val readingIndex = backStack.indexOfFirst { it is Route.Reading }
-                                if (readingIndex != -1) {
-                                    repeat(backStack.size - readingIndex) {
-                                        backStack.removeLastOrNull()
-                                    }
-                                }
-                                scope.launch {
-                                    delay(500L)
-                                    backStack.add(Reading(articleId = articleId))
-                                }
+                                resetBackStackToFeeds(backStack)
+                                backStack.add(
+                                    Reading(
+                                        articleId = articleId,
+                                        launchId = System.currentTimeMillis(),
+                                    )
+                                )
                             }
 
                             is LaunchAction.OpenArticleList -> {
@@ -181,33 +200,36 @@ class MainActivity : AppCompatActivity() {
                                 )
                                     return@Consumer
                                 filterUseCase.init(feedId, groupId)
-                                val readingIndex = backStack.indexOfFirst { it is Reading }
-                                if (readingIndex != -1) {
-                                    repeat(backStack.size - readingIndex) {
-                                        backStack.removeLastOrNull()
-                                    }
-                                }
-                                backStack.add(Reading(articleId = null))
+                                resetBackStackToFeeds(backStack)
+                                backStack.add(
+                                    Reading(
+                                        articleId = null,
+                                        launchId = System.currentTimeMillis(),
+                                    )
+                                )
                             }
 
                             is LaunchAction.Subscribe -> {
                                 subscribeViewModel.handleSharedUrlFromIntent(action.url)
-                                val feedsIndex = backStack.indexOf(Route.Feeds)
-                                if (feedsIndex != -1) {
-                                    repeat(backStack.size - (feedsIndex + 1)) {
-                                        backStack.removeLastOrNull()
-                                    }
-                                } else {
-                                    backStack.add(0, Route.Feeds)
-                                    repeat(backStack.size - 1) { backStack.removeLastOrNull() }
-                                }
+                                resetBackStackToFeeds(backStack)
                             }
                         }
                     }
                 }
-            listener.accept(intent) // consume the launch intent as well
             addOnNewIntentListener(listener)
             onDispose { removeOnNewIntentListener(listener) }
+        }
+    }
+
+    private fun resetBackStackToFeeds(backStack: NavBackStack<NavKey>) {
+        val feedsIndex = backStack.indexOf(Route.Feeds)
+        if (feedsIndex != -1) {
+            repeat(backStack.size - (feedsIndex + 1)) {
+                backStack.removeLastOrNull()
+            }
+        } else {
+            backStack.add(0, Route.Feeds)
+            repeat(backStack.size - 1) { backStack.removeLastOrNull() }
         }
     }
 
@@ -215,13 +237,27 @@ class MainActivity : AppCompatActivity() {
         WidgetUpdateWorker.enqueueOneTimeWork(workManager)
         super.onResume()
     }
+
+    override fun onPause() {
+        diffMapHolder.writeDiffsToCacheSync()
+        super.onPause()
+    }
+
+    override fun onStop() {
+        diffMapHolder.writeDiffsToCacheSync()
+        super.onStop()
+    }
 }
 
 sealed interface LaunchAction {
     data class Subscribe(val url: String) : LaunchAction
 
-    data class OpenArticle(val articleId: String, val feedId: String?, val groupId: String?) :
-        LaunchAction
+    data class OpenArticle(
+        val articleId: String,
+        val feedId: String?,
+        val groupId: String?,
+        val accountId: Int? = null,
+    ) : LaunchAction
 
     data class OpenArticleList(val accountId: Int?, val feedId: String?, val groupId: String?) :
         LaunchAction
@@ -245,17 +281,34 @@ private fun Intent.getLaunchAction(): LaunchAction? {
             val feedId = getStringExtra(ExtraName.FEED_ID)?.also { removeExtra(ExtraName.FEED_ID) }
             val groupId =
                 getStringExtra(ExtraName.GROUP_ID)?.also { removeExtra(ExtraName.GROUP_ID) }
+            val openUnreadFlow =
+                getBooleanExtra(ExtraName.OPEN_UNREAD_FLOW, false).also {
+                    if (it) removeExtra(ExtraName.OPEN_UNREAD_FLOW)
+                }
             val accountId = getIntExtra(ExtraName.ACCOUNT_ID, -1)
 
             if (accountId != -1) {
                 removeExtra(ExtraName.ACCOUNT_ID)
             }
 
+            val resolvedAccountId = if (accountId != -1) accountId else null
+
             if (articleId != null) {
-                LaunchAction.OpenArticle(articleId, feedId, groupId)
+                LaunchAction.OpenArticle(
+                    articleId = articleId,
+                    feedId = feedId,
+                    groupId = groupId,
+                    accountId = resolvedAccountId,
+                )
+            } else if (openUnreadFlow) {
+                LaunchAction.OpenArticleList(
+                    accountId = resolvedAccountId,
+                    feedId = null,
+                    groupId = null,
+                )
             } else if (feedId != null || groupId != null || accountId != -1) {
                 LaunchAction.OpenArticleList(
-                    accountId = if (accountId != -1) accountId else null,
+                    accountId = resolvedAccountId,
                     feedId = feedId,
                     groupId = groupId,
                 )

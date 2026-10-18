@@ -169,7 +169,7 @@ constructor(
         preDate: Date = Date(),
     ): List<Article> =
         try {
-            val accountId = context.currentAccountId
+            val accountId = feed.accountId
             val response = response(okHttpClient, feed.url)
             val contentType = response.header("Content-Type")
 

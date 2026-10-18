@@ -359,6 +359,9 @@ constructor(
                         isUnread = false,
                     )
                 }
+                if (toBeReadLocal.isNotEmpty()) {
+                    notificationHelper.cancelNotificationsForArticles(toBeReadLocal)
+                }
             }
 
             launch {
@@ -372,6 +375,9 @@ constructor(
                         ids = it.toSet(),
                         isUnread = true,
                     )
+                }
+                if (toBeUnreadLocal.isNotEmpty()) {
+                    toBeUnreadLocal.forEach { notificationHelper.markArticleUnreadInMemory(it) }
                 }
             }
 
@@ -470,31 +476,27 @@ constructor(
             val articlesToNotify = mutableListOf<Article>()
 
             if (deferredList.isNotEmpty()) {
-                launch {
-                        whileSelect {
-                            for (deferred in deferredList) {
-                                deferred.onAwait {
-                                    articleDao.insertList(it)
-                                    articlesToNotify.addAll(
-                                        it.fastFilter {
-                                            it.isUnread && notificationFeedIds.contains(it.feedId)
-                                        }
-                                    )
-                                    deferredList.remove(deferred)
-                                    deferredList.isNotEmpty()
+                whileSelect {
+                    for (deferred in deferredList) {
+                        deferred.onAwait { batch ->
+                            val rowIds = articleDao.insertList(batch)
+                            val newlyInserted =
+                                batch.filterIndexed { index, _ -> rowIds.getOrNull(index) != -1L }
+                            articlesToNotify.addAll(
+                                newlyInserted.fastFilter {
+                                    it.isUnread && notificationFeedIds.contains(it.feedId)
                                 }
-                            }
+                            )
+                            deferredList.remove(deferred)
+                            deferredList.isNotEmpty()
                         }
                     }
-                    .invokeOnCompletion {
-                        launch {
-                            articlesToNotify
-                                .groupBy { it.feedId }
-                                .mapKeys { (feedId, _) -> notificationFeeds[feedId]!! }
-                                .forEach { (feed, articles) ->
-                                    notificationHelper.notify(feed, articles)
-                                }
-                        }
+                }
+                articlesToNotify
+                    .groupBy { it.feedId }
+                    .mapKeys { (feedId, _) -> notificationFeeds[feedId]!! }
+                    .forEach { (feed, articles) ->
+                        notificationHelper.notify(feed, articles)
                     }
             }
 
@@ -599,17 +601,23 @@ constructor(
                     starredIds = remoteStarredIds.await(),
                 )
 
-            if (feed.isNotification) {
-                val articlesToNotify = items.fastFilter { it.isUnread }
-                notificationHelper.notify(feed, articlesToNotify)
+            val insertedRowIds = articleDao.insertList(items)
+            val newlyInsertedItems =
+                items.filterIndexed { index, _ -> insertedRowIds.getOrNull(index) != -1L }
+
+            if (feed.isNotification && newlyInsertedItems.isNotEmpty()) {
+                val articlesToNotify = newlyInsertedItems.fastFilter { it.isUnread }
+                if (articlesToNotify.isNotEmpty()) {
+                    notificationHelper.notify(feed, articlesToNotify)
+                }
             }
 
             launch {
                 val remoteReadIds = remoteAllIds.await() - remoteUnreadIds.await()
                 val toBeReadIds = remoteReadIds.intersect(localUnreadIds)
+                val toBeReadDbIds = toBeReadIds.map { it.dbId(accountId) }
 
-                toBeReadIds
-                    .map { it.dbId(accountId) }
+                toBeReadDbIds
                     .chunked(1000)
                     .forEach {
                         articleDao.markAsReadByIdSet(
@@ -618,12 +626,15 @@ constructor(
                             isUnread = false,
                         )
                     }
+                if (toBeReadDbIds.isNotEmpty()) {
+                    notificationHelper.cancelNotificationsForArticles(toBeReadDbIds)
+                }
             }
 
             launch {
                 val toBeUnreadIds = localReadIds.intersect(remoteUnreadIds.await())
-                toBeUnreadIds
-                    .map { it.dbId(accountId) }
+                val toBeUnreadDbIds = toBeUnreadIds.map { it.dbId(accountId) }
+                toBeUnreadDbIds
                     .chunked(1000)
                     .forEach {
                         articleDao.markAsReadByIdSet(
@@ -632,6 +643,9 @@ constructor(
                             isUnread = true,
                         )
                     }
+                if (toBeUnreadDbIds.isNotEmpty()) {
+                    toBeUnreadDbIds.forEach { notificationHelper.markArticleUnreadInMemory(it) }
+                }
             }
 
             launch {
@@ -663,7 +677,6 @@ constructor(
                     }
             }
 
-            articleDao.insert(*items.toTypedArray())
             Timber.i("onCompletion: ${System.currentTimeMillis() - preTime}")
 
             ListenableWorker.Result.success()

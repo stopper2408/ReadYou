@@ -673,11 +673,13 @@ fun FlowPage(
                                 articleListTonalElevation = articleListTonalElevation.value,
                                 isSwipeEnabled = { listState.isScrollInProgress },
                                 onClick = { articleWithFeed, index ->
-                                    if (articleWithFeed.feed.isBrowser) {
+                                    if (viewModel.diffMapHolder.checkIfUnread(articleWithFeed)) {
                                         viewModel.diffMapHolder.updateDiff(
                                             articleWithFeed,
                                             isUnread = false,
                                         )
+                                    }
+                                    if (articleWithFeed.feed.isBrowser) {
                                         context.openURL(
                                             articleWithFeed.article.link,
                                             openLink,

@@ -147,16 +147,58 @@ constructor(
         conditions: MarkAsReadConditions,
         isUnread: Boolean,
     ) {
+        val beforeDate = conditions.toDate()
+        if (!isUnread && conditions == MarkAsReadConditions.All) {
+            if (groupId == null && feedId == null && articleId == null) {
+                diffMapHolder.cancelAllNotifications()
+            } else if (groupId != null && feedId == null && articleId == null) {
+                diffMapHolder.cancelNotificationsForGroup(groupId)
+            } else if (feedId != null && articleId == null) {
+                diffMapHolder.cancelNotificationsForFeeds(listOf(feedId))
+            }
+        }
+        val loadedMatchingItems =
+            articleListUseCase.itemSnapshotList.items
+                .filterIsInstance<ArticleFlowItem.Article>()
+                .map { it.articleWithFeed }
+                .filter { item ->
+                    (groupId == null || item.feed.groupId == groupId) &&
+                        (feedId == null || item.feed.id == feedId) &&
+                        (articleId == null || item.article.id == articleId) &&
+                        item.article.date <= beforeDate
+                }
+        if (loadedMatchingItems.isNotEmpty()) {
+            diffMapHolder.updateDiff(
+                articleWithFeed = loadedMatchingItems.toTypedArray(),
+                isUnread = isUnread,
+            )
+        }
         applicationScope.launch(ioDispatcher) {
-            rssService
-                .get()
-                .markAsRead(
-                    groupId = groupId,
-                    feedId = feedId,
-                    articleId = articleId,
-                    before = conditions.toDate(),
-                    isUnread = isUnread,
-                )
+            if (!isUnread) {
+                val unreadDiffs =
+                    rssService
+                        .get()
+                        .queryUnreadDiffsToMarkAsRead(
+                            groupId = groupId,
+                            feedId = feedId,
+                            articleId = articleId,
+                            before = beforeDate,
+                        )
+                if (unreadDiffs.isNotEmpty()) {
+                    diffMapHolder.updateDiff(diffs = unreadDiffs, isUnread = false)
+                }
+            } else {
+                diffMapHolder.commitDiffsToDbSuspend()
+                rssService
+                    .get()
+                    .markAsRead(
+                        groupId = groupId,
+                        feedId = feedId,
+                        articleId = articleId,
+                        before = beforeDate,
+                        isUnread = true,
+                    )
+            }
         }
     }
 
@@ -169,16 +211,16 @@ constructor(
     }
 
     fun markAsReadFromListByDate(date: Date, isBefore: Boolean) {
-        viewModelScope.launch(ioDispatcher) {
+        applicationScope.launch(ioDispatcher) {
             val items =
                 articleListUseCase.itemSnapshotList
                     .filterIsInstance<ArticleFlowItem.Article>()
                     .map { it.articleWithFeed }
                     .filter {
                         if (isBefore) {
-                            date > it.article.date && it.article.isUnread
+                            date > it.article.date && diffMapHolder.checkIfUnread(it)
                         } else {
-                            date < it.article.date && it.article.isUnread
+                            date < it.article.date && diffMapHolder.checkIfUnread(it)
                         }
                     }
                     .distinctBy { it.article.id }
@@ -188,30 +230,71 @@ constructor(
     }
 
     fun loadNextFeedOrGroup() {
-        viewModelScope.launch {
+        applicationScope.launch(ioDispatcher) {
             if (
                 settingsProvider.settings.pullToSwitchFeed ==
                     PullToLoadNextFeedPreference.MarkAsReadAndLoadNextFeed
             ) {
-                markAllAsRead()
+                markAllAsReadSuspend()
             }
             flowUiState.value?.nextFilterState?.let { filterStateUseCase.updateFilterState(it) }
         }
     }
 
     fun markAllAsRead() {
-        viewModelScope.launch {
-            val items =
-                articleListUseCase.itemSnapshotList.items
-                    .filterIsInstance<ArticleFlowItem.Article>()
-                    .map { it.articleWithFeed }
+        val filterState = filterStateUseCase.filterStateFlow.value
+        if (filterState.group == null && filterState.feed == null) {
+            diffMapHolder.cancelAllNotifications()
+        } else if (filterState.feed != null) {
+            diffMapHolder.cancelNotificationsForFeeds(listOf(filterState.feed.id))
+        } else if (filterState.group != null) {
+            diffMapHolder.cancelNotificationsForGroup(filterState.group.id)
+        }
+        val items =
+            articleListUseCase.itemSnapshotList.items
+                .filterIsInstance<ArticleFlowItem.Article>()
+                .map { it.articleWithFeed }
 
+        if (items.isNotEmpty()) {
             diffMapHolder.updateDiff(articleWithFeed = items.toTypedArray(), isUnread = false)
+        }
+        applicationScope.launch(ioDispatcher) {
+            markAllAsReadSuspend()
+        }
+    }
+
+    private suspend fun markAllAsReadSuspend() {
+        val filterState = filterStateUseCase.filterStateFlow.value
+        if (filterState.group == null && filterState.feed == null) {
+            diffMapHolder.cancelAllNotifications()
+        } else if (filterState.feed != null) {
+            diffMapHolder.cancelNotificationsForFeeds(listOf(filterState.feed.id))
+        } else if (filterState.group != null) {
+            diffMapHolder.cancelNotificationsForGroup(filterState.group.id)
+        }
+        val items =
+            articleListUseCase.itemSnapshotList.items
+                .filterIsInstance<ArticleFlowItem.Article>()
+                .map { it.articleWithFeed }
+
+        if (items.isNotEmpty()) {
+            diffMapHolder.updateDiff(articleWithFeed = items.toTypedArray(), isUnread = false)
+        }
+        val unreadDiffs =
+            rssService
+                .get()
+                .queryUnreadDiffsToMarkAsRead(
+                    groupId = filterState.group?.id,
+                    feedId = filterState.feed?.id,
+                    articleId = null,
+                    before = MarkAsReadConditions.All.toDate(),
+                )
+        if (unreadDiffs.isNotEmpty()) {
+            diffMapHolder.updateDiff(diffs = unreadDiffs, isUnread = false)
         }
     }
 
     fun sync() {
-        diffMapHolder.commitDiffsToDb()
         viewModelScope.launch {
             _isSyncingFlow.value = true
             val isSyncing = syncWorkerStatusFlow.value
@@ -223,6 +306,7 @@ constructor(
             }
         }
         applicationScope.launch(ioDispatcher) {
+            diffMapHolder.commitDiffsToDbSuspend()
             val filterState = filterStateUseCase.filterStateFlow.value
             val service = rssService.get()
             when (service) {
@@ -272,26 +356,31 @@ constructor(
         get() = readingUiState.value.articleWithFeed?.feed
 
     fun initData(articleId: String, listIndex: Int? = null) {
-        viewModelScope.launch {
-            val snapshotList = articleListUseCase.itemSnapshotList
+        diffMapHolder.cancelNotificationForArticle(articleId)
+        val snapshotList = articleListUseCase.itemSnapshotList
+        val itemByIndex =
+            listIndex?.let { snapshotList.getOrNull(it) as? ArticleFlowItem.Article }
+        val itemFromList =
+            if (itemByIndex != null && itemByIndex.articleWithFeed.article.id == articleId) {
+                itemByIndex
+            } else {
+                snapshotList.find { item ->
+                    item is ArticleFlowItem.Article &&
+                        item.articleWithFeed.article.id == articleId
+                } as? ArticleFlowItem.Article
+            }
 
-            val itemByIndex =
-                listIndex?.let { snapshotList.getOrNull(it) as? ArticleFlowItem.Article }
+        itemFromList?.articleWithFeed?.let { item ->
+            if (diffMapHolder.checkIfUnread(item)) {
+                diffMapHolder.updateDiff(item, isUnread = false)
+            }
+        }
 
-            val itemFromList =
-                if (itemByIndex != null && itemByIndex.articleWithFeed.article.id != articleId) {
-                    itemByIndex
-                } else {
-                    snapshotList.find { item ->
-                        item is ArticleFlowItem.Article &&
-                            item.articleWithFeed.article.id == articleId
-                    } as? ArticleFlowItem.Article
-                }
-
+        applicationScope.launch(ioDispatcher) {
             val item =
-                itemByIndex?.articleWithFeed
-                    ?: (itemFromList?.articleWithFeed
-                        ?: rssService.get().findArticleById(articleId)!!)
+                itemFromList?.articleWithFeed
+                    ?: rssService.get().findArticleById(articleId)
+                    ?: return@launch
 
             if (diffMapHolder.checkIfUnread(item)) {
                 diffMapHolder.updateDiff(item, isUnread = false)
@@ -319,6 +408,11 @@ constructor(
     fun clearReadingData() {
         _readingUiState.update { ReadingUiState() }
         _readerState.update { ReaderState() }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        diffMapHolder.commitDiffsToDb()
     }
 
     suspend fun ReaderState.renderContent(articleWithFeed: ArticleWithFeed): ReaderState {

@@ -21,6 +21,7 @@ import java.util.Date
 @Dao
 interface ArticleDao {
 
+    @Transaction
     @Query(
         """
         UPDATE article SET isStarred = :isStarred 
@@ -28,12 +29,13 @@ interface ArticleDao {
         AND id in (:ids)
         """
     )
-    fun markAsStarredByIdSet(
+    suspend fun markAsStarredByIdSet(
         accountId: Int,
         ids: Set<String>,
         isStarred: Boolean,
     ): Int
 
+    @Transaction
     @Query(
         """
         UPDATE article SET isUnread = :isUnread 
@@ -41,7 +43,7 @@ interface ArticleDao {
         AND id in (:ids)
         """
     )
-    fun markAsReadByIdSet(
+    suspend fun markAsReadByIdSet(
         accountId: Int,
         ids: Set<String>,
         isUnread: Boolean,
@@ -890,14 +892,33 @@ interface ArticleDao {
     )
     fun queryLatestUnreadArticleFlow(accountId: Int, limit: Int): Flow<List<ArticleWithFeed>>
 
+    @Query(
+        """
+        SELECT * FROM article
+        WHERE id IN (:ids)
+        """
+    )
+    suspend fun queryArticlesByIds(ids: Collection<String>): List<Article>
+
+    @Query(
+        """
+        SELECT * FROM article
+        WHERE feedId = :feedId
+        AND isUnread = 1
+        ORDER BY date DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun queryUnreadArticlesListByFeedId(feedId: String, limit: Int = 50): List<Article>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(vararg article: Article)
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insertOnConflictIgnore(vararg article: Article)
+    suspend fun insertOnConflictIgnore(vararg article: Article): List<Long>
 
-    @Insert
-    suspend fun insertList(articles: List<Article>)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertList(articles: List<Article>): List<Long>
 
     @Delete
     suspend fun delete(vararg article: Article)
@@ -905,16 +926,64 @@ interface ArticleDao {
     @Update
     suspend fun update(vararg article: Article)
 
+    @Query(
+        """
+        SELECT 0 AS isUnread, id AS articleId, feedId FROM article
+        WHERE accountId = :accountId
+        AND (:groupId IS NULL OR feedId IN (SELECT id FROM feed WHERE groupId = :groupId))
+        AND (:feedId IS NULL OR feedId = :feedId)
+        AND (:articleId IS NULL OR id = :articleId)
+        AND isUnread = 1
+        AND date <= :before
+        """
+    )
+    suspend fun queryUnreadDiffsToMarkAsRead(
+        accountId: Int,
+        groupId: String?,
+        feedId: String?,
+        articleId: String?,
+        before: Date,
+    ): List<me.ash.reader.domain.data.Diff>
+
+    @Transaction
+    suspend fun batchMarkAsRead(accountId: Int, articleIds: Set<String>, isUnread: Boolean) {
+        if (articleIds.isEmpty()) return
+        articleIds.chunked(500).forEach { chunk ->
+            markAsReadByIdSet(accountId, chunk.toSet(), isUnread)
+        }
+    }
+
     @Transaction
     suspend fun insertListIfNotExist(articles: List<Article>, feed: Feed): List<Article> {
-        if (articles.isEmpty()) return articles
+        if (articles.isEmpty()) return emptyList()
 
-        val existingArticles = queryArticlesByLinks(
-            linkList = articles.map { it.link },
-            feedId = feed.id,
-            accountId = feed.accountId
-        ).associateBy { it.link }
+        val distinctArticles = articles.distinctBy { it.link.ifBlank { "${it.title}_${it.date.time}" } }
+        val nonBlankLinks = distinctArticles.mapNotNull { it.link.takeIf { link -> link.isNotBlank() } }
+        val existingLinks =
+            if (nonBlankLinks.isNotEmpty()) {
+                nonBlankLinks
+                    .chunked(500)
+                    .flatMap { chunk ->
+                        queryArticlesByLinks(
+                            linkList = chunk,
+                            feedId = feed.id,
+                            accountId = feed.accountId,
+                        )
+                    }
+                    .map { it.link }
+                    .toSet()
+            } else {
+                emptySet()
+            }
 
-        return articles.filterNot { existingArticles.containsKey(it.link) }.also { insertList(it) }
+        val candidates =
+            distinctArticles
+                .filterNot { it.link.isNotBlank() && existingLinks.contains(it.link) }
+                .map { it.copy(feedId = feed.id, accountId = feed.accountId) }
+
+        if (candidates.isEmpty()) return emptyList()
+
+        val rowIds = insertList(candidates)
+        return candidates.filterIndexed { index, _ -> rowIds.getOrNull(index) != -1L }
     }
 }

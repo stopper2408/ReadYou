@@ -96,9 +96,13 @@ constructor(
                                     articles = fetchedArticles,
                                     feed = currentFeed,
                                 )
-                            if (currentFeed.isNotification && newArticles.isNotEmpty()) {
+                            val newUnreadArticles = newArticles.filter { it.isUnread }
+                            if (currentFeed.isNotification && newUnreadArticles.isNotEmpty()) {
                                 notificationHelper.notify(
-                                    fetchedFeed.copy(articles = newArticles, feed = currentFeed)
+                                    fetchedFeed.copy(
+                                        articles = newUnreadArticles,
+                                        feed = fetchedFeed.feed.copy(isNotification = true),
+                                    )
                                 )
                             }
                         }
@@ -116,14 +120,16 @@ constructor(
 
     private suspend fun syncFeed(feed: Feed, preDate: Date = Date()): FeedWithArticle {
         val articles = rssHelper.queryRssXml(feed, "", preDate)
+        var updatedFeed = feed
         if (feed.icon == null) {
             val iconLink = rssHelper.queryRssIconLink(feed.url)
             if (iconLink != null) {
                 rssHelper.saveRssIcon(feedDao, feed, iconLink)
+                updatedFeed = feed.copy(icon = iconLink)
             }
         }
         return FeedWithArticle(
-            feed = feed.copy(isNotification = feed.isNotification && articles.isNotEmpty()),
+            feed = updatedFeed.copy(isNotification = feed.isNotification && articles.isNotEmpty()),
             articles = articles,
         )
     }
